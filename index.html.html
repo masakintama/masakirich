@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>スロットゲーム</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
+<script>
+// ============================================================
+// Phaser 3 版スロットゲーム
+// Processing版からの移植
+//
+// 【画像ファイル】同じフォルダに配置してください:
+//   button1.png, button2.png, lever1.png, lever2.png
+//   standby.png, start.png, suisyou.png, gogo.png
+//   clear1.jpg, clear2.jpg, clear3.jpg, gameover.jpg
+//   start_button1.png, start_button2.png
+//   count0.jpg 〜 count8.jpg
+//
+// 【音声ファイル】同じフォルダに配置してください:
+//   vvv.mp3, bgm1.mp3, bgm2.mp3, sakibare1.mp3
+//   countdown.mp3, last.mp3, gako.wav
+// ============================================================
+
+// ---- グローバル状態 ----
+let scene_name = "start";
+let spinning = false;
+let winReady = false;
+let pressStep = 0;
+let countdown = 8;
+let showStandby = true;
+let showSuisyou = false;
+let showGogo = false;
+let bgm1Started = false;
+let clearCount = 0;
+let leverPressCount = 0;
+let firstLeverPressed = false;
+let darkLevel = 0;
+let targetDark = 0;
+let hueVal = 0;
+let rainbowBG = false;
+let screenShake = false;
+let shakeFrames = 0;
+let shakeIntensity = 10;
+let leverLocked = false;
+let startButtonPressed = false;
+let slotValues = ["?", "?", "?"];
+let slotPressedThisRound = [false, false, false];
+
+// ---- Phaser シーン共通クラス ----
+
+// ============================================================
+// StartScene
+// ============================================================
+class StartScene extends Phaser.Scene {
+  constructor() { super({ key: 'StartScene' }); }
+
+  preload() {
+    // 画像
+    this.load.image('start', 'start.png');
+    this.load.image('start_button1', 'start_button1.png');
+    this.load.image('start_button2', 'start_button2.png');
+    this.load.image('standby', 'standby.png');
+    this.load.image('suisyou', 'suisyou.png');
+    this.load.image('gogo', 'gogo.png');
+    this.load.image('button1', 'button1.png');
+    this.load.image('button2', 'button2.png');
+    this.load.image('lever1', 'lever1.png');
+    this.load.image('lever2', 'lever2.png');
+    this.load.image('clear1', 'clear1.jpg');
+    this.load.image('clear2', 'clear2.jpg');
+    this.load.image('clear3', 'clear3.jpg');
+    this.load.image('gameover', 'gameover.jpg');
+    for (let i = 0; i <= 8; i++) {
+      this.load.image('count' + i, 'count' + i + '.jpg');
+    }
+    // 音声
+    this.load.audio('winSE', 'vvv.mp3');
+    this.load.audio('bgm1', 'bgm1.mp3');
+    this.load.audio('bgm2', 'bgm2.mp3');
+    this.load.audio('sakibareSE', 'sakibare1.mp3');
+    this.load.audio('countdownSE', 'countdown.mp3');
+    this.load.audio('lastSE', 'last.mp3');
+    this.load.audio('gakoSE', 'gako.wav');
+  }
+
+  create() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    // 背景
+    this.bg = this.add.image(W/2, H/2, 'start').setDisplaySize(W, H);
+
+    // スタートボタン (ImgButton相当)
+    this.startBtn = this.add.image(W/2, H/2 + 90, 'start_button1')
+      .setDisplaySize(200, 80)
+      .setInteractive({ useHandCursor: true });
+
+    this.startBtn.on('pointerdown', () => {
+      this.startBtn.setTexture('start_button2');
+      startButtonPressed = true;
+    });
+    this.startBtn.on('pointerup', () => {
+      this.startBtn.setTexture('start_button1');
+      if (startButtonPressed) {
+        startButtonPressed = false;
+        initGameState();
+        this.scene.start('GameScene');
+      }
+    });
+    this.startBtn.on('pointerout', () => {
+      this.startBtn.setTexture('start_button1');
+      startButtonPressed = false;
+    });
+
+    // bgm2 loop（タイトル）
+    if (!this.sound.get('bgm2') || !this.sound.get('bgm2').isPlaying) {
+      this.sound.play('bgm2', { loop: true });
+    }
+  }
+}
+
+// ============================================================
+// GameScene
+// ============================================================
+class GameScene extends Phaser.Scene {
+  constructor() { super({ key: 'GameScene' }); }
+
+  create() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    // ---- 背景画像 ----
+    this.bgImg = this.add.image(W/2, H/2, 'standby').setDisplaySize(W, H);
+
+    // ---- レインボーオーバーレイ ----
+    this.rainbowOverlay = this.add.rectangle(W/2, H/2, W, H, 0xffffff, 0).setDepth(1);
+
+    // ---- 暗転オーバーレイ ----
+    this.darkOverlay = this.add.rectangle(W/2, H/2, W, H, 0x000000, 0).setDepth(2);
+
+    // ---- レバー ----
+    this.lever = this.add.image(40 + 30, 320 + 75, 'lever1')
+      .setDisplaySize(60, 150)
+      .setInteractive({ useHandCursor: true })
+      .setDepth(10);
+
+    this.lever.on('pointerdown', () => this.onLeverPress());
+    this.lever.on('pointerup', () => this.lever.setTexture('lever1'));
+    this.lever.on('pointerout', () => this.lever.setTexture('lever1'));
+
+    // ---- スロットボタン x3 ----
+    this.slotBtns = [];
+    this.slotTexts = [];
+    for (let i = 0; i < 3; i++) {
+      const sx = 150 + i * 100 + 40;
+      const sy = 380 + 40;
+      const btn = this.add.image(sx, sy, 'button1')
+        .setDisplaySize(80, 80)
+        .setInteractive({ useHandCursor: true })
+        .setDepth(10);
+      btn.slotIndex = i;
+      btn.on('pointerdown', () => { btn.setTexture('button2'); this.onSlotPress(i); });
+      btn.on('pointerup', () => btn.setTexture('button1'));
+      btn.on('pointerout', () => btn.setTexture('button1'));
+      this.slotBtns.push(btn);
+
+      const txt = this.add.text(sx, sy, '?', {
+        fontSize: '28px', color: '#000000', fontFamily: 'MS Gothic, monospace'
+      }).setOrigin(0.5).setDepth(11);
+      this.slotTexts.push(txt);
+    }
+
+    // ---- gogo画像 ----
+    this.gogoImg = this.add.image(W - 50, 70, 'gogo')
+      .setDisplaySize(100, 100)
+      .setDepth(10)
+      .setVisible(false);
+
+    // ---- すいしょう画像（警告）: ボタン・レバーより下のオーバーレイ ----
+    this.suisyouImg = this.add.image(W/2, H/2, 'suisyou')
+      .setDisplaySize(W, H)
+      .setDepth(5)
+      .setVisible(false);
+
+    // ---- サウンド ----
+    this.bgm1 = this.sound.get('bgm1') || this.sound.add('bgm1', { loop: true });
+    this.bgm2 = this.sound.get('bgm2') || this.sound.add('bgm2', { loop: true });
+    this.winSE = this.sound.add('winSE');
+    this.sakibareSE = this.sound.add('sakibareSE');
+    this.countdownSE = this.sound.add('countdownSE');
+    this.lastSE = this.sound.add('lastSE');
+    this.gakoSE = this.sound.add('gakoSE');
+
+    // bgm2 stop→bgm state sync
+    this.bgm1Started = false;
+    if (!this.sound.get('bgm2')?.isPlaying) {
+      this.sound.play('bgm2', { loop: true });
+    }
+
+    // カメラシェイク用
+    this.cameras.main.setBackgroundColor('#000000');
+
+    this._updateBG();
+    this._updateSlotTexts();
+  }
+
+  update() {
+    if (scene_name !== 'game') return;
+
+    // レインボー背景
+    if (rainbowBG) {
+      hueVal = (hueVal + 2) % 360;
+      const color = Phaser.Display.Color.HSLToColor(hueVal / 360, 1, 0.5);
+      this.rainbowOverlay.setFillStyle(color.color, 0.12);
+    } else {
+      this.rainbowOverlay.setFillStyle(0xffffff, 0);
+    }
+
+    // 暗転補間（lerp）
+    darkLevel = Phaser.Math.Linear(darkLevel, targetDark, 0.1);
+    if (leverPressCount === 3) {
+      this.darkOverlay.setFillStyle(0x000000, darkLevel / 255);
+    } else {
+      this.darkOverlay.setFillStyle(0x000000, 0);
+    }
+
+    // gogo
+    this.gogoImg.setVisible(showGogo);
+
+    // suisyou
+    this.suisyouImg.setVisible(showSuisyou);
+  }
+
+  _updateBG() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    if (showStandby) {
+      this.bgImg.setTexture('standby');
+    } else if (showSuisyou) {
+      this.bgImg.setTexture('suisyou');
+    } else {
+      if (leverPressCount === 3) {
+        this.bgImg.setTexture('count0');
+      } else {
+        const idx = Phaser.Math.Clamp(countdown, 0, 8);
+        this.bgImg.setTexture('count' + idx);
+      }
+    }
+    this.bgImg.setDisplaySize(W, H);
+  }
+
+  _updateSlotTexts() {
+    for (let i = 0; i < 3; i++) {
+      if (slotPressedThisRound[i]) {
+        this.slotTexts[i].setText(slotValues[i]).setVisible(true);
+      } else {
+        this.slotTexts[i].setVisible(false);
+      }
+      this.slotBtns[i].setTexture('button1');
+    }
+  }
+
+  onLeverPress() {
+    if (spinning || leverLocked) return;
+
+    this.lever.setTexture('lever2');
+    leverPressCount++;
+    leverLocked = true;
+    showStandby = false;
+    showSuisyou = false;
+
+    winReady = Math.random() < 0.39;
+
+    if (winReady) {
+      if (Math.random() < 0.03) {
+        showGogo = true;
+        if (!this.gakoSE.isPlaying) this.gakoSE.play();
+      }
+      if (Math.random() < 0.1) rainbowBG = true;
+      if (Math.random() < 0.1) this.sakibareSE.play();
+      if (Math.random() < 0.05) {
+        this.cameras.main.shake(500, 0.02);
+      }
+    }
+
+    firstLeverPressed = true;
+
+    if (firstLeverPressed && leverPressCount > 1 && countdown > 0) {
+      countdown--;
+      this.countdownSE.play();
+    }
+
+    if (!bgm1Started) {
+      this.sound.stopAll();
+      this.bgm1.play();
+      bgm1Started = true;
+    }
+
+    spinning = true;
+    pressStep = 0;
+    for (let j = 0; j < 3; j++) slotPressedThisRound[j] = false;
+
+    judgeResult();
+
+    // スピン: 1フレーム後に終了（Processing版と同じ即時確定）
+    this.time.delayedCall(80, () => {
+      spinning = false;
+      this._updateBG();
+      this._updateSlotTexts();
+    });
+  }
+
+  onSlotPress(i) {
+    if (spinning) return;
+    if (showStandby) return;
+    if (slotPressedThisRound[i]) return;
+
+    this.slotBtns[i].setTexture('button2');
+
+    if (countdown === 0) {
+      if (this.lastSE.isPlaying) this.lastSE.stop();
+      this.lastSE.play();
+    }
+
+    if (i !== pressStep) {
+      showSuisyou = true;
+      this._updateBG();
+      return;
+    }
+
+    pressStep++;
+    slotPressedThisRound[i] = true;
+
+    if (pressStep >= 3) {
+      leverLocked = false;
+    }
+
+    this._updateSlotTexts();
+
+    // 勝利判定
+    if (winReady && slotValues[i] === '7') {
+      scene_name = 'clear';
+      clearCount++;
+      this.stopAllSounds();
+      this.winSE.play();
+      this.scene.start('ClearScene');
+      return;
+    }
+
+    if (leverPressCount === 3) {
+      targetDark = 200;
+    }
+
+    if (countdown > 0) {
+      countdown--;
+      this.countdownSE.play();
+    }
+
+    this._updateBG();
+
+    // ゲームオーバー判定
+    if (leverPressCount === 3 && i === 2 && pressStep === 3) {
+      scene_name = 'gameover';
+      this.stopAllSounds();
+      this.scene.start('GameOverScene');
+      return;
+    }
+  }
+
+  stopAllSounds() {
+    this.sound.stopAll();
+  }
+}
+
+// ============================================================
+// ClearScene
+// ============================================================
+class ClearScene extends Phaser.Scene {
+  constructor() { super({ key: 'ClearScene' }); }
+
+  create() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    let tex = 'clear1';
+    if (clearCount > 10) tex = 'clear3';
+    else if (clearCount > 5) tex = 'clear2';
+
+    this.add.image(W/2, H/2, tex).setDisplaySize(W, H);
+
+    this.add.text(W/2, H/2, clearCount + ' 回クリア', {
+      fontSize: '32px', color: '#000000', fontFamily: 'MS Gothic, monospace'
+    }).setOrigin(0.5);
+
+    this.add.text(W/2, H/2 + 60, 'タップで次へ', {
+      fontSize: '32px', color: '#000000', fontFamily: 'MS Gothic, monospace'
+    }).setOrigin(0.5);
+
+    this.input.once('pointerdown', () => {
+      initGameState();
+      scene_name = 'game';
+      this.scene.start('GameScene');
+    });
+  }
+}
+
+// ============================================================
+// GameOverScene
+// ============================================================
+class GameOverScene extends Phaser.Scene {
+  constructor() { super({ key: 'GameOverScene' }); }
+
+  create() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+
+    this.add.image(W/2, H/2, 'gameover').setDisplaySize(W, H);
+
+    this.add.text(W - 20, H - 20, 'RUSH ' + clearCount, {
+      fontSize: '32px', color: '#000000', fontFamily: 'MS Gothic, monospace'
+    }).setOrigin(1, 1);
+
+    this.add.text(W/2, H/2, 'タップでタイトルへ', {
+      fontSize: '32px', color: '#000000', fontFamily: 'MS Gothic, monospace'
+    }).setOrigin(0.5);
+
+    this.input.once('pointerdown', () => {
+      clearCount = 0;
+      scene_name = 'start';
+      initGameState();
+      this.scene.start('StartScene');
+    });
+  }
+}
+
+// ============================================================
+// ヘルパー関数
+// ============================================================
+function initGameState() {
+  showStandby = true;
+  showSuisyou = false;
+  showGogo = false;
+  countdown = 8;
+  slotValues = ['?', '?', '?'];
+  slotPressedThisRound = [false, false, false];
+  pressStep = 0;
+  firstLeverPressed = false;
+  leverPressCount = 0;
+  leverLocked = false;
+  spinning = false;
+  bgm1Started = false;
+  darkLevel = 0;
+  targetDark = 0;
+  rainbowBG = false;
+  hueVal = 0;
+}
+
+function judgeResult() {
+  if (winReady) {
+    const hit = Math.floor(Math.random() * 3);
+    for (let i = 0; i < 3; i++) {
+      slotValues[i] = (i === hit) ? '7' : 'X';
+    }
+  } else {
+    for (let i = 0; i < 3; i++) {
+      slotValues[i] = 'X';
+    }
+  }
+}
+
+// ============================================================
+// Phaser 起動設定
+// ============================================================
+const config = {
+  type: Phaser.AUTO,
+  width: 500,
+  height: 500,
+  backgroundColor: '#000000',
+  scene: [StartScene, GameScene, ClearScene, GameOverScene],
+  scale: {
+    mode: Phaser.Scale.FIT,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+  },
+  audio: {
+    disableWebAudio: false
+  }
+};
+
+const game = new Phaser.Game(config);
+</script>
+</body>
+</html>
